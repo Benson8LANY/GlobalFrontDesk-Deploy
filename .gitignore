@@ -1,0 +1,6 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+.deployment.tfplan
+deployment-result.txt
+

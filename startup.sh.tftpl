@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+exec > >(tee -a /var/log/global-front-desk-install.log) 2>&1
+
+for _ in $(seq 1 60); do
+  if getent ahosts "${fqdn}" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 5
+done
+
+getent ahosts "${fqdn}" >/dev/null 2>&1
+curl --proto '=https' --tlsv1.2 -fsSL "${installer_url}" |
+  env \
+    EMAIL_AUTOMATION_FQDN="${fqdn}" \
+    EMAIL_AUTOMATION_ACME_EMAIL="tls@globalfrontdesk.com" \
+    EMAIL_AUTOMATION_RELEASE_CHANNEL="${release_channel}" \
+    EMAIL_AUTOMATION_SETUP_TOKEN="${setup_token}" \
+    bash
+
