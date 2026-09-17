@@ -231,7 +231,7 @@ info "Pulling immutable images and starting the customer plane"
 "${compose[@]}" up -d postgres embeddings
 migrated=false
 for attempt in 1 2 3; do
-  if "${compose[@]}" run --rm migrate; then
+  if "${compose[@]}" run --rm migrate </dev/null; then
     migrated=true
     break
   fi
