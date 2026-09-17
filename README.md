@@ -18,4 +18,4 @@ https://shell.cloud.google.com/cloudshell/editor?cloudshell_git_repo=https://git
 
 ## Release-distribution requirement
 
-The signed runtime images referenced by the release manifest must be pullable by a newly created customer VM. The current private preview registry does not meet that requirement. Do not enable the website button until the signed customer images are available through the production distribution path and a clean customer project completes the full deployment test.
+The signed installer and release files are published at `https://benson8lany.github.io/GlobalFrontDesk-Deploy/`. The signed runtime images referenced by the release manifest must be anonymously pullable by a newly created customer VM. Do not enable the website button until those images are public and a clean customer project completes the full deployment test.

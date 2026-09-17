@@ -41,7 +41,7 @@ variable "source_image" {
 variable "installer_url" {
   description = "HTTPS URL of the signed Global Front Desk installer."
   type        = string
-  default     = "https://vendor-test.globalfrontdesk.com/install.sh"
+  default     = "https://benson8lany.github.io/GlobalFrontDesk-Deploy/install.sh"
 
   validation {
     condition     = can(regex("^https://", var.installer_url))
@@ -59,4 +59,3 @@ variable "release_channel" {
     error_message = "Release channel must be preview or stable."
   }
 }
-
