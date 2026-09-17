@@ -1,0 +1,57 @@
+{
+  "sequence": 8,
+  "version": "0.1.0-preview.4",
+  "channel": "preview",
+  "publishedAt": "2026-09-17T15:49:08.790Z",
+  "minimumInstallerVersion": "1.0.0",
+  "images": {
+    "api": "ghcr.io/benson8lany/email-automation-api@sha256:0b8c3501212b07ad23595d9bdf2a060dc070bccd3aa48d8022367d29bf1577fb",
+    "worker": "ghcr.io/benson8lany/email-automation-worker@sha256:40191c4e338a810fa930ecf95335366455d08c683ab7e5ee2115eb1df2c43b68",
+    "web": "ghcr.io/benson8lany/email-automation-web@sha256:60643a242056d988af883561630808607ca0a4d99ee75a5662a8e83e575ac1bc",
+    "migrate": "ghcr.io/benson8lany/email-automation-migrate@sha256:d42dbd7c4e275a320c568f3c1ee4980c4523b0c1d5e02bec0dc0946fa9771621",
+    "clientGateway": "ghcr.io/benson8lany/email-automation-client-gateway@sha256:f0d737235ee298bb9daa977f6fb1359ffa7e2dc0b81cb0943a4e57439cedc1e9",
+    "postgres": "pgvector/pgvector@sha256:78bf48b801e792f99e3ac62b5036fd3876e9be48afda16c1e331af1c75ceb2ff",
+    "embeddings": "ghcr.io/huggingface/text-embeddings-inference@sha256:8de25e75ce39617f17f2f6c77d60a4f75b65e779ed5005420eb1400072a15c1c",
+    "caddy": "caddy@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648"
+  },
+  "bundle": {
+    "compose": {
+      "url": "https://benson8lany.github.io/GlobalFrontDesk-Deploy/releases/0.1.0-preview.4/compose.yaml",
+      "sha256": "bdc1e562f7d759a9725f35530aaf2accd9fb32290e2338e54c8784543cf209c9"
+    },
+    "caddyfile": {
+      "url": "https://benson8lany.github.io/GlobalFrontDesk-Deploy/releases/0.1.0-preview.4/Caddyfile",
+      "sha256": "827a1b44c18a6d55755425ccbb4fd07fa280e761f15a93f7e2f0b405baba29a4"
+    },
+    "manager": {
+      "url": "https://benson8lany.github.io/GlobalFrontDesk-Deploy/releases/0.1.0-preview.4/email-automation",
+      "sha256": "f82c02f525b1675e52b07336a1d42d44c598f02383e0485890321303fa36b050"
+    },
+    "timer": {
+      "url": "https://benson8lany.github.io/GlobalFrontDesk-Deploy/releases/0.1.0-preview.4/email-automation-update.timer",
+      "sha256": "cb1cc646e5c17c00774697f5d6c0cf6ed7cc4807742efad293b5694ee0ff5878"
+    },
+    "service": {
+      "url": "https://benson8lany.github.io/GlobalFrontDesk-Deploy/releases/0.1.0-preview.4/email-automation-update.service",
+      "sha256": "b212b49e7b0a223086f6376f0dc8c6fbca03b5fd2e675e40e45808e130171518"
+    },
+    "imagePublicKey": {
+      "url": "https://benson8lany.github.io/GlobalFrontDesk-Deploy/releases/0.1.0-preview.4/image-public-key.pem",
+      "sha256": "0872f4957a9fc7ddbb02b8058d1a8aa31feee62ccec74af618b00ca73c528cc3"
+    }
+  },
+  "cosign": {
+    "amd64": {
+      "url": "https://github.com/sigstore/cosign/releases/download/v3.1.3/cosign-linux-amd64",
+      "sha256": "4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71"
+    },
+    "arm64": {
+      "url": "https://github.com/sigstore/cosign/releases/download/v3.1.3/cosign-linux-arm64",
+      "sha256": "c5d324e091826b0d7a78eb16fef316450b4eb9aaec045611c08ba06f5e73220a"
+    }
+  },
+  "license": {
+    "controlUrl": "https://vendor-test.globalfrontdesk.com",
+    "publicKeyBase64": "MCowBQYDK2VwAyEA0GSCjtdz8Tjuz6XjajQOtOMdbDvipfWtCrdu97RFIwM="
+  }
+}
