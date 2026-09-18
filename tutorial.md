@@ -25,7 +25,7 @@ These permissions apply only to the project selected above.
 Click **Run** on the command below. It shows the exact project and infrastructure before anything is created, then asks you to confirm.
 
 ```sh
-bash deploy.sh
+bash deploy.sh "<walkthrough-project-id/>"
 ```
 
 The deployment normally takes 5–10 minutes. Keep this browser tab open. The installer waits for the private workspace and prints the one-time owner setup link only when the site is ready.

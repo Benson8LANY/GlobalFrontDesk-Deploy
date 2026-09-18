@@ -5,13 +5,49 @@ umask 077
 die() { printf 'Deployment stopped: %s\n' "$*" >&2; exit 1; }
 info() { printf '\n==> %s\n' "$*"; }
 
+ensure_terraform() {
+  if command -v terraform >/dev/null 2>&1 && terraform version 2>/dev/null | grep -q '^Terraform v'; then
+    return
+  fi
+
+  local version="1.15.9"
+  local architecture archive checksum
+  case "$(uname -m)" in
+    x86_64)
+      architecture="amd64"
+      checksum="76edd0b22d2f27d3d2e097cd793209646f719cf60f02ff3af626b07361137da1"
+      ;;
+    aarch64|arm64)
+      architecture="arm64"
+      checksum="0afa6c29f61ca5ea270e950e43e50ecf2418b598507bf580e8ae76e1e6699b19"
+      ;;
+    *)
+      die "This Cloud Shell architecture is not supported: $(uname -m)"
+      ;;
+  esac
+
+  archive="terraform_${version}_linux_${architecture}.zip"
+  info "Installing the verified Terraform command in this Cloud Shell session"
+  mkdir -p "$HOME/.local/bin"
+  curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+    "https://releases.hashicorp.com/terraform/${version}/${archive}" \
+    --output "/tmp/${archive}"
+  printf '%s  %s\n' "$checksum" "/tmp/${archive}" | sha256sum --check --status \
+    || die "Terraform download verification failed."
+  unzip -oq "/tmp/${archive}" -d "$HOME/.local/bin"
+  rm -f "/tmp/${archive}"
+  export PATH="$HOME/.local/bin:$PATH"
+  terraform version | head -1 | grep -q '^Terraform v' \
+    || die "Terraform could not be installed in Cloud Shell."
+}
+
 command -v gcloud >/dev/null || die "Google Cloud CLI is required. Open this installer in Google Cloud Shell."
-command -v terraform >/dev/null || die "Terraform is required. Google Cloud Shell includes Terraform."
+ensure_terraform
 
 active_account="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' | head -1)"
 [[ -n "$active_account" ]] || die "Sign in to Google Cloud before deploying."
 
-project_id="${GOOGLE_CLOUD_PROJECT:-${CLOUDSDK_CORE_PROJECT:-}}"
+project_id="${1:-${GOOGLE_CLOUD_PROJECT:-${CLOUDSDK_CORE_PROJECT:-}}}"
 if [[ -z "$project_id" ]]; then
   project_id="$(gcloud config get-value project 2>/dev/null || true)"
 fi
@@ -34,7 +70,9 @@ info "Preparing the customer-owned deployment"
 terraform init -input=false
 
 info "Showing the infrastructure Google will create"
+rm -f .deployment.tfplan
 terraform plan -input=false -out=.deployment.tfplan -var="project_id=$project_id"
+[[ -s .deployment.tfplan ]] || die "Terraform did not create a deployment plan. Nothing was changed."
 
 printf '\nThis plan creates one VM, one encrypted disk, a dedicated network, firewall rules, a static IP, and a runtime service account.\n'
 read -r -p "Approve this deployment? [y/N] " approve
