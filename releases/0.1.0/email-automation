@@ -1,0 +1,457 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+export DOCKER_CONFIG="${DOCKER_CONFIG:-/root/.docker}"
+
+readonly INSTALL_DIR="${EMAIL_AUTOMATION_INSTALL_DIR:-/opt/email-automation}"
+readonly MANAGER_STATE_DIR="${EMAIL_AUTOMATION_STATE_DIR:-/var/lib/email-automation}"
+readonly BACKUP_DIR="${EMAIL_AUTOMATION_BACKUP_DIR:-/var/backups/email-automation}"
+readonly RELEASE_KEY="$INSTALL_DIR/release-public-key.pem"
+readonly IMAGE_KEY="$INSTALL_DIR/image-public-key.pem"
+readonly VERSION="1.0.0"
+declare -a TEMP_PATHS=()
+
+cleanup_temp_paths() {
+  local path
+  for path in "${TEMP_PATHS[@]}"; do
+    case "$path" in
+      /tmp/tmp.*|/private/tmp/tmp.*) rm -rf -- "$path" ;;
+    esac
+  done
+}
+trap cleanup_temp_paths EXIT
+
+die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
+info() { printf '%s\n' "$*"; }
+require_root() { [[ "${EUID:-$(id -u)}" -eq 0 ]] || die "Run with sudo."; }
+require_install() { [[ -f "$INSTALL_DIR/.env.customer" && -f "$INSTALL_DIR/release.env" ]] || die "No installation found in $INSTALL_DIR."; }
+compose() {
+  docker compose --project-directory "$INSTALL_DIR" \
+    --env-file "$INSTALL_DIR/.env.customer" \
+    --env-file "$INSTALL_DIR/release.env" \
+    -f "$INSTALL_DIR/compose.yaml" "$@"
+}
+sha256_file() { sha256sum "$1" | awk '{print $1}'; }
+download_verified() {
+  local url="$1" expected="$2" destination="$3"
+  curl --proto '=https' --tlsv1.2 -fsSL --retry 3 "$url" -o "$destination"
+  [[ "$(sha256_file "$destination")" == "$expected" ]] || die "Checksum verification failed for $url."
+}
+
+fetch_manifest() {
+  local channel="$1" destination="$2" signature="$3"
+  # shellcheck disable=SC1091
+  source "$INSTALL_DIR/release.env"
+  [[ "$channel" == "stable" || "$channel" == "preview" ]] || die "Invalid release channel."
+  [[ -s "$RELEASE_KEY" ]] || die "Release verification key is missing."
+  curl --proto '=https' --tlsv1.2 -fsSL --retry 3 "$RELEASE_BASE_URL/channels/$channel/manifest.json" -o "$destination"
+  curl --proto '=https' --tlsv1.2 -fsSL --retry 3 "$RELEASE_BASE_URL/channels/$channel/manifest.sig" -o "$signature"
+  openssl pkeyutl -verify -pubin -inkey "$RELEASE_KEY" -rawin -in "$destination" -sigfile "$signature" >/dev/null 2>&1 || die "Release manifest signature is invalid."
+  jq -e --arg channel "$channel" '
+    (.sequence | type == "number" and . >= 1) and
+    (.version | type == "string") and
+    (.channel == $channel) and
+    (.images.api | test("@sha256:[a-f0-9]{64}$")) and
+    (.images.worker | test("@sha256:[a-f0-9]{64}$")) and
+    (.images.web | test("@sha256:[a-f0-9]{64}$")) and
+    (.images.migrate | test("@sha256:[a-f0-9]{64}$")) and
+    (.license.publicKeyBase64 | type == "string")
+  ' "$destination" >/dev/null || die "Release manifest structure is invalid."
+
+  local minimum_installer
+  minimum_installer="$(jq -r '.minimumInstallerVersion' "$destination")"
+  [[ "$(printf '%s\n%s\n' "$minimum_installer" "$VERSION" | sort -V | head -1)" == "$minimum_installer" ]] || die "Release requires management CLI $minimum_installer or newer."
+
+  local sequence highest=0
+  sequence="$(jq -r '.sequence' "$destination")"
+  [[ -f "$MANAGER_STATE_DIR/highest-manifest-sequence" ]] && highest="$(cat "$MANAGER_STATE_DIR/highest-manifest-sequence")"
+  [[ "$sequence" =~ ^[0-9]+$ && "$highest" =~ ^[0-9]+$ ]] || die "Invalid anti-rollback state."
+  (( sequence >= highest )) || die "Manifest sequence $sequence is below highest accepted sequence $highest. Use the explicit rollback command with a cached signed release."
+  mkdir -p "$MANAGER_STATE_DIR/manifests/$sequence"
+  install -m 0644 "$destination" "$MANAGER_STATE_DIR/manifests/$sequence/manifest.json"
+  install -m 0644 "$signature" "$MANAGER_STATE_DIR/manifests/$sequence/manifest.sig"
+  printf '%s\n' "$sequence" > "$MANAGER_STATE_DIR/highest-manifest-sequence"
+}
+
+ensure_cosign() {
+  local manifest="$1" arch item url digest staged
+  command -v cosign >/dev/null 2>&1 && return
+  arch="$(dpkg --print-architecture)"
+  [[ "$arch" == "amd64" || "$arch" == "arm64" ]] || die "Unsupported architecture: $arch"
+  item=".cosign.$arch"
+  url="$(jq -r "$item.url" "$manifest")"
+  digest="$(jq -r "$item.sha256" "$manifest")"
+  staged="$(mktemp)"
+  download_verified "$url" "$digest" "$staged"
+  install -m 0755 "$staged" /usr/local/bin/cosign
+  rm -f "$staged"
+}
+
+stage_bundle() {
+  local manifest="$1" stage="$2" field url digest name
+  mkdir -p "$stage"
+  for field in compose caddyfile manager timer service imagePublicKey; do
+    url="$(jq -r ".bundle.$field.url" "$manifest")"
+    digest="$(jq -r ".bundle.$field.sha256" "$manifest")"
+    case "$field" in
+      compose) name=compose.yaml ;;
+      caddyfile) name=Caddyfile ;;
+      manager) name=email-automation ;;
+      timer) name=email-automation-update.timer ;;
+      service) name=email-automation-update.service ;;
+      imagePublicKey) name=image-public-key.pem ;;
+    esac
+    download_verified "$url" "$digest" "$stage/$name"
+  done
+}
+
+verify_first_party_images() {
+  local manifest="$1" verification_key="${2:-$IMAGE_KEY}" component image
+  [[ -s "$verification_key" ]] || die "Image verification key is missing."
+  for component in api worker web migrate clientGateway; do
+    image="$(jq -r ".images.$component" "$manifest")"
+    cosign verify --key "$verification_key" "$image" >/dev/null || die "Image signature verification failed for $component."
+  done
+}
+
+write_release_env() {
+  local manifest="$1" destination="$2"
+  {
+    printf 'APP_VERSION=%q\n' "$(jq -r '.version' "$manifest")"
+    printf 'RELEASE_CHANNEL=%q\n' "$(jq -r '.channel' "$manifest")"
+    printf 'RELEASE_SEQUENCE=%q\n' "$(jq -r '.sequence' "$manifest")"
+    printf 'RELEASE_BASE_URL=%q\n' "${RELEASE_BASE_URL}"
+    printf 'STATE_DIR=%q\n' "$MANAGER_STATE_DIR"
+    for component in api worker web migrate postgres embeddings caddy; do
+      printf '%s_IMAGE=%q\n' "$(printf '%s' "$component" | tr '[:lower:]' '[:upper:]')" "$(jq -r ".images.$component" "$manifest")"
+    done
+  } > "$destination"
+  chmod 0600 "$destination"
+}
+
+install_bundle() {
+  local manifest="$1" stage="$2"
+  install -m 0644 "$stage/compose.yaml" "$INSTALL_DIR/compose.yaml"
+  install -m 0644 "$stage/Caddyfile" "$INSTALL_DIR/Caddyfile"
+  install -m 0644 "$stage/image-public-key.pem" "$IMAGE_KEY"
+  install -m 0755 "$stage/email-automation" /usr/local/sbin/email-automation.new
+  install -m 0644 "$stage/email-automation-update.timer" /etc/systemd/system/email-automation-update.timer
+  install -m 0644 "$stage/email-automation-update.service" /etc/systemd/system/email-automation-update.service
+  write_release_env "$manifest" "$INSTALL_DIR/release.env.new"
+}
+
+activate_staged_bundle() {
+  [[ ! -f "$INSTALL_DIR/release.env.new" ]] || mv "$INSTALL_DIR/release.env.new" "$INSTALL_DIR/release.env"
+  mv /usr/local/sbin/email-automation.new /usr/local/sbin/email-automation
+  systemctl daemon-reload
+  systemctl enable --now email-automation-update.timer >/dev/null
+}
+
+write_update_status() {
+  local state="$1" available="$2" message="${3:-}"
+  # shellcheck disable=SC1091
+  source "$INSTALL_DIR/release.env"
+  jq -n \
+    --arg installed "$APP_VERSION" --arg channel "$RELEASE_CHANNEL" \
+    --arg available "$available" --arg state "$state" --arg message "$message" \
+    '{installedVersion:$installed,channel:$channel,availableVersion:(if $available == "" then null else $available end),updateAvailable:($state == "available"),checkedAt:(now|todateiso8601),state:$state} + (if $message == "" then {} else {message:$message} end)' \
+    > "$MANAGER_STATE_DIR/update-status.json.tmp"
+  chmod 0644 "$MANAGER_STATE_DIR/update-status.json.tmp"
+  mv "$MANAGER_STATE_DIR/update-status.json.tmp" "$MANAGER_STATE_DIR/update-status.json"
+}
+
+check_update() {
+  require_install
+  local tmp manifest signature available
+  tmp="$(mktemp -d)"; TEMP_PATHS+=("$tmp")
+  # shellcheck disable=SC1091
+  source "$INSTALL_DIR/release.env"
+  manifest="$tmp/manifest.json"; signature="$tmp/manifest.sig"
+  if ! fetch_manifest "$RELEASE_CHANNEL" "$manifest" "$signature"; then
+    write_update_status error "" "Signed update check failed."
+    return 1
+  fi
+  available="$(jq -r '.version' "$manifest")"
+  if [[ "$available" == "$APP_VERSION" ]]; then
+    write_update_status current "$available"
+    info "Version $APP_VERSION is current on channel $RELEASE_CHANNEL."
+  else
+    write_update_status available "$available"
+    info "Signed update $available is available on channel $RELEASE_CHANNEL. Run: sudo email-automation update"
+  fi
+}
+
+backup() {
+  require_install
+  local timestamp work archive destination owner_user
+  # shellcheck disable=SC1091
+  source "$INSTALL_DIR/.env.customer"
+  owner_user="${POSTGRES_OWNER_USER:-mail_app}"
+  timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  work="$(mktemp -d)"; TEMP_PATHS+=("$work")
+  archive="$work/recovery.tar.gz"
+  destination="${1:-$BACKUP_DIR/email-automation-$timestamp.cms}"
+  [[ -s "$INSTALL_DIR/backup-recipient.crt" ]] || die "Backup recipient certificate is missing."
+  mkdir -p "$(dirname "$destination")"
+  compose exec -T postgres pg_dump -U "$owner_user" -d mail_automation -Fc > "$work/database.dump"
+  mkdir -p "$MANAGER_STATE_DIR/knowledge-files"
+  tar -C "$MANAGER_STATE_DIR" -czf "$work/knowledge-files.tar.gz" knowledge-files
+  cp "$INSTALL_DIR/.env.customer" "$work/.env.customer"
+  cp "$INSTALL_DIR/release.env" "$work/release.env"
+  cp "$INSTALL_DIR/backup-recipient.crt" "$work/backup-recipient.crt"
+  jq -n --arg createdAt "$(date -u +%FT%TZ)" --arg installationId "$(sed -n 's/^INSTALLATION_ID=//p' "$INSTALL_DIR/.env.customer")" '{format:1,createdAt:$createdAt,installationId:$installationId,requires:["backup-identity.pem","backup-recipient.crt"]}' > "$work/recovery.json"
+  tar -C "$work" -czf "$archive" database.dump knowledge-files.tar.gz .env.customer release.env backup-recipient.crt recovery.json
+  openssl cms -encrypt -binary -aes-256-cbc -outform DER -in "$archive" -out "$destination" "$INSTALL_DIR/backup-recipient.crt"
+  chmod 0600 "$destination"
+  info "Encrypted recovery backup created: $destination"
+  info "Keep an exported recovery identity off this server."
+}
+
+export_recovery_key() {
+  local destination="${1:-}"
+  [[ -n "$destination" ]] || die "Usage: email-automation recovery-key export /secure/off-server/directory"
+  [[ -s "$INSTALL_DIR/secrets/backup-identity.pem" ]] || die "Recovery identity is missing."
+  mkdir -p "$destination"
+  install -m 0600 "$INSTALL_DIR/secrets/backup-identity.pem" "$destination/backup-identity.pem"
+  install -m 0644 "$INSTALL_DIR/backup-recipient.crt" "$destination/backup-recipient.crt"
+  info "Recovery identity exported to $destination. Store it separately from the server and backups."
+}
+
+prepare_restored_database_env() {
+  local env_file="$1"
+  unset POSTGRES_OWNER_USER POSTGRES_OWNER_PASSWORD POSTGRES_RUNTIME_PASSWORD POSTGRES_PASSWORD
+  # shellcheck disable=SC1090
+  source "$env_file"
+  [[ -z "${POSTGRES_OWNER_PASSWORD:-}" || -z "${POSTGRES_RUNTIME_PASSWORD:-}" ]] || return 0
+  [[ -n "${POSTGRES_PASSWORD:-}" ]] || die "The backup has no recoverable database-owner credential."
+  local new_owner_password new_runtime_password
+  new_owner_password="$(openssl rand -hex 32)"
+  new_runtime_password="$(openssl rand -hex 32)"
+  {
+    printf 'POSTGRES_OWNER_USER=%s\n' "${POSTGRES_OWNER_USER:-mail_app}"
+    printf 'POSTGRES_OWNER_PASSWORD=%s\n' "$new_owner_password"
+    printf 'POSTGRES_RUNTIME_PASSWORD=%s\n' "$new_runtime_password"
+  } >> "$env_file"
+}
+
+restore_backup() {
+  local backup_file="${1:-}" identity_dir="${2:-}"
+  [[ -f "$backup_file" ]] || die "Encrypted backup file not found."
+  [[ -s "$identity_dir/backup-identity.pem" && -s "$identity_dir/backup-recipient.crt" ]] || die "Restore requires the exported recovery identity directory."
+  local work owner_user; work="$(mktemp -d)"; TEMP_PATHS+=("$work")
+  openssl cms -decrypt -binary -inform DER -in "$backup_file" -recip "$identity_dir/backup-recipient.crt" -inkey "$identity_dir/backup-identity.pem" -out "$work/recovery.tar.gz" || die "Recovery material does not decrypt this backup."
+  tar -C "$work" -xzf "$work/recovery.tar.gz"
+  [[ -s "$work/database.dump" && -s "$work/knowledge-files.tar.gz" && -s "$work/.env.customer" ]] || die "Backup is incomplete."
+  local encryption_key
+  encryption_key="$(sed -n 's/^ENCRYPTION_KEY_BASE64=//p' "$work/.env.customer")"
+  [[ "$(printf '%s' "$encryption_key" | base64 -d 2>/dev/null | wc -c | tr -d ' ')" == "32" ]] || die "Backup encryption key is missing or invalid."
+  info "Recovery material verified. Restoring will replace current application data."
+  read -r -p "Type RESTORE to continue: " confirmation
+  [[ "$confirmation" == "RESTORE" ]] || die "Restore cancelled."
+  compose stop api worker web
+  mkdir -p "$work/knowledge-restore"
+  tar -C "$work/knowledge-restore" -xzf "$work/knowledge-files.tar.gz"
+  [[ -d "$work/knowledge-restore/knowledge-files" ]] || die "Knowledge document backup is invalid."
+  rm -rf "$MANAGER_STATE_DIR/knowledge-files"
+  mv "$work/knowledge-restore/knowledge-files" "$MANAGER_STATE_DIR/knowledge-files"
+  chown -R 1000:1000 "$MANAGER_STATE_DIR/knowledge-files"
+  chmod 0700 "$MANAGER_STATE_DIR/knowledge-files"
+  prepare_restored_database_env "$work/.env.customer"
+  install -m 0600 "$work/.env.customer" "$INSTALL_DIR/.env.customer"
+  # shellcheck disable=SC1091
+  source "$INSTALL_DIR/.env.customer"
+  owner_user="${POSTGRES_OWNER_USER:-mail_app}"
+  compose up -d postgres
+  compose exec -T postgres psql -U "$owner_user" -d mail_automation -v ON_ERROR_STOP=1 -c "alter role $owner_user password '$POSTGRES_OWNER_PASSWORD'" >/dev/null
+  compose exec -T postgres pg_restore -U "$owner_user" -d mail_automation --clean --if-exists < "$work/database.dump"
+  compose run --rm migrate
+  compose up -d api worker web caddy
+  info "Restore completed. Run email-automation doctor."
+}
+
+apply_manifest() {
+  local manifest="$1" stage="$2"
+  ensure_cosign "$manifest"
+  stage_bundle "$manifest" "$stage"
+  verify_first_party_images "$manifest" "$stage/image-public-key.pem"
+  install_bundle "$manifest" "$stage"
+}
+
+perform_update() {
+  require_install
+  local tmp manifest signature new_version old_env old_compose old_caddy
+  tmp="$(mktemp -d)"; TEMP_PATHS+=("$tmp")
+  # shellcheck disable=SC1091
+  source "$INSTALL_DIR/release.env"
+  # shellcheck disable=SC1091
+  source "$INSTALL_DIR/.env.customer"
+  ensure_database_credentials
+  ensure_setup_bootstrap_env
+  # shellcheck disable=SC1091
+  source "$INSTALL_DIR/.env.customer"
+  manifest="$tmp/manifest.json"; signature="$tmp/manifest.sig"
+  fetch_manifest "$RELEASE_CHANNEL" "$manifest" "$signature"
+  new_version="$(jq -r '.version' "$manifest")"
+  [[ "$new_version" != "$APP_VERSION" ]] || { info "Version $APP_VERSION is already current."; return; }
+  backup
+  old_env="$tmp/release.env"; old_compose="$tmp/compose.yaml"; old_caddy="$tmp/Caddyfile"
+  cp "$INSTALL_DIR/release.env" "$old_env"; cp "$INSTALL_DIR/compose.yaml" "$old_compose"; cp "$INSTALL_DIR/Caddyfile" "$old_caddy"
+  apply_manifest "$manifest" "$tmp/bundle"
+  mv "$INSTALL_DIR/release.env.new" "$INSTALL_DIR/release.env"
+  if compose pull && compose up -d postgres embeddings && compose run --rm migrate && compose up -d api worker web caddy; then
+    local ready=false
+    for _ in $(seq 1 30); do
+      if curl --proto '=https' --tlsv1.2 -fsS "https://${FQDN}/health/ready" >/dev/null; then ready=true; break; fi
+      sleep 4
+    done
+    if [[ "$ready" == true ]]; then
+      activate_staged_bundle
+      write_update_status current "$new_version"
+      info "Updated successfully to $new_version."
+      return
+    fi
+  fi
+  cp "$old_env" "$INSTALL_DIR/release.env"; cp "$old_compose" "$INSTALL_DIR/compose.yaml"; cp "$old_caddy" "$INSTALL_DIR/Caddyfile"
+  compose up -d || true
+  write_update_status error "$new_version" "Update failed health checks; previous service manifest restored. Database restore may be required for an incompatible migration."
+  die "Update failed. Previous images were restarted; review logs before any explicit database restore."
+}
+
+ensure_database_credentials() {
+  require_install
+  # shellcheck disable=SC1091
+  source "$INSTALL_DIR/.env.customer"
+  [[ -z "${POSTGRES_OWNER_PASSWORD:-}" || -z "${POSTGRES_RUNTIME_PASSWORD:-}" ]] || return 0
+  [[ -n "${POSTGRES_PASSWORD:-}" ]] || die "Legacy database password is unavailable for privilege migration."
+  local owner_user="${POSTGRES_OWNER_USER:-mail_app}" new_owner_password new_runtime_password
+  new_owner_password="$(openssl rand -hex 32)"
+  new_runtime_password="$(openssl rand -hex 32)"
+  compose exec -T postgres psql -U "$owner_user" -d mail_automation -v ON_ERROR_STOP=1 -c "alter role $owner_user password '$new_owner_password'" >/dev/null
+  sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$new_owner_password/" "$INSTALL_DIR/.env.customer"
+  {
+    printf 'POSTGRES_OWNER_USER=%s\n' "$owner_user"
+    printf 'POSTGRES_OWNER_PASSWORD=%s\n' "$new_owner_password"
+    printf 'POSTGRES_RUNTIME_PASSWORD=%s\n' "$new_runtime_password"
+  } >> "$INSTALL_DIR/.env.customer"
+  chmod 0600 "$INSTALL_DIR/.env.customer"
+  info "Separated and rotated migration-owner and runtime database credentials."
+}
+
+ensure_setup_bootstrap_env() {
+  require_install
+  grep -q '^SETUP_BOOTSTRAP_TOKEN_HASH=' "$INSTALL_DIR/.env.customer" && return
+  local token token_hash fqdn
+  token="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
+  token_hash="$(printf '%s' "$token" | sha256sum | awk '{print $1}')"
+  printf 'SETUP_BOOTSTRAP_TOKEN_HASH=%s\n' "$token_hash" >> "$INSTALL_DIR/.env.customer"
+  chmod 0600 "$INSTALL_DIR/.env.customer"
+  fqdn="$(sed -n 's/^FQDN=//p' "$INSTALL_DIR/.env.customer")"
+  info "If this installation has no owner yet, use this one-time setup link after the update: https://$fqdn/login#setup=$token"
+}
+
+rollback_release() {
+  require_install
+  local sequence="${1:-}" cached tmp stage
+  [[ "$sequence" =~ ^[0-9]+$ ]] || die "Usage: email-automation rollback <accepted-manifest-sequence>"
+  cached="$MANAGER_STATE_DIR/manifests/$sequence/manifest.json"
+  local cached_signature="$MANAGER_STATE_DIR/manifests/$sequence/manifest.sig"
+  [[ -s "$cached" && -s "$cached_signature" ]] || die "Only a previously verified cached manifest can be used for rollback."
+  openssl pkeyutl -verify -pubin -inkey "$RELEASE_KEY" -rawin -in "$cached" -sigfile "$cached_signature" >/dev/null 2>&1 || die "Cached rollback manifest signature is invalid."
+  info "Rollback is explicit and may be incompatible with database migrations."
+  read -r -p "Type ROLLBACK to continue: " confirmation
+  [[ "$confirmation" == "ROLLBACK" ]] || die "Rollback cancelled."
+  backup
+  tmp="$(mktemp -d)"; TEMP_PATHS+=("$tmp"); stage="$tmp/bundle"
+  # shellcheck disable=SC1091
+  source "$INSTALL_DIR/release.env"
+  apply_manifest "$cached" "$stage"
+  mv "$INSTALL_DIR/release.env.new" "$INSTALL_DIR/release.env"
+  compose pull
+  compose up -d
+  activate_staged_bundle
+  info "Rolled back to verified release $(jq -r '.version' "$cached")."
+}
+
+doctor() {
+  require_install
+  # shellcheck disable=SC1091
+  source "$INSTALL_DIR/.env.customer"
+  compose config --quiet
+  [[ "$(stat -c '%a' "$INSTALL_DIR/.env.customer")" == "600" ]] || die ".env.customer permissions must be 600."
+  openssl x509 -in "$INSTALL_DIR/backup-recipient.crt" -noout -checkend 2592000 >/dev/null || die "Backup recovery certificate expires within 30 days."
+  compose ps
+  curl --proto '=https' --tlsv1.2 -fsS "https://${FQDN}/health/ready" >/dev/null
+  info "Configuration, recovery certificate, containers, and HTTPS health checks passed."
+}
+
+rotate_setup_link() {
+  require_install
+  local initialized token token_hash fqdn owner_user
+  # shellcheck disable=SC1091
+  source "$INSTALL_DIR/.env.customer"
+  owner_user="${POSTGRES_OWNER_USER:-mail_app}"
+  initialized="$(compose exec -T postgres psql -U "$owner_user" -d mail_automation -Atc "select coalesce((select initialized_at is not null from installation_settings limit 1), false)")"
+  [[ "$initialized" == "f" || "$initialized" == "false" ]] || die "The installation is already initialized; its setup link cannot be rotated."
+  token="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
+  token_hash="$(printf '%s' "$token" | sha256sum | awk '{print $1}')"
+  compose exec -T postgres psql -U "$owner_user" -d mail_automation -v ON_ERROR_STOP=1 -c "update installation_settings set setup_token_hash = '$token_hash', updated_at = now() where initialized_at is null" >/dev/null
+  if grep -q '^SETUP_BOOTSTRAP_TOKEN_HASH=' "$INSTALL_DIR/.env.customer"; then
+    sed -i "s/^SETUP_BOOTSTRAP_TOKEN_HASH=.*/SETUP_BOOTSTRAP_TOKEN_HASH=$token_hash/" "$INSTALL_DIR/.env.customer"
+  else
+    printf 'SETUP_BOOTSTRAP_TOKEN_HASH=%s\n' "$token_hash" >> "$INSTALL_DIR/.env.customer"
+  fi
+  chmod 0600 "$INSTALL_DIR/.env.customer"
+  fqdn="$(sed -n 's/^FQDN=//p' "$INSTALL_DIR/.env.customer")"
+  compose restart api >/dev/null
+  info "One-time owner setup link: https://$fqdn/login#setup=$token"
+}
+
+uninstall_customer() {
+  require_install
+  local purge=false installation_id confirmation
+  [[ "${1:-}" == "--purge-data" ]] && purge=true
+  # shellcheck disable=SC1091
+  source "$INSTALL_DIR/.env.customer"
+  installation_id="$INSTALLATION_ID"
+  if [[ "$purge" == true ]]; then
+    info "This permanently deletes the local database and application volumes."
+    read -r -p "Type installation ID $installation_id to continue: " confirmation
+    [[ "$confirmation" == "$installation_id" ]] || die "Installation ID did not match."
+    compose down --volumes
+  else
+    compose down
+    info "Services removed. Customer data and recovery files were preserved."
+  fi
+  systemctl disable --now email-automation-update.timer >/dev/null 2>&1 || true
+}
+
+usage() {
+  cat <<EOF
+Email Automation management CLI $VERSION
+Usage:
+  email-automation status | doctor | logs | restart
+  email-automation update [--check]
+  email-automation backup [destination.cms]
+  email-automation recovery-key export <secure-directory>
+  email-automation setup-link rotate
+  email-automation restore <backup.cms> <recovery-identity-directory>
+  email-automation rollback <accepted-manifest-sequence>
+  email-automation uninstall [--purge-data]
+EOF
+}
+
+require_root
+case "${1:-}" in
+  status) require_install; compose ps; [[ -f "$MANAGER_STATE_DIR/update-status.json" ]] && jq . "$MANAGER_STATE_DIR/update-status.json" ;;
+  doctor) doctor ;;
+  logs) require_install; if [[ -n "${2:-}" ]]; then compose logs --tail=200 "$2"; else compose logs --tail=200; fi ;;
+  restart) require_install; compose restart ;;
+  update) [[ "${2:-}" == "--check" ]] && check_update || perform_update ;;
+  backup) backup "${2:-}" ;;
+  recovery-key) [[ "${2:-}" == "export" ]] || die "Only recovery-key export is supported."; export_recovery_key "${3:-}" ;;
+  setup-link) [[ "${2:-}" == "rotate" ]] || die "Only setup-link rotate is supported."; rotate_setup_link ;;
+  restore) restore_backup "${2:-}" "${3:-}" ;;
+  rollback) rollback_release "${2:-}" ;;
+  uninstall) uninstall_customer "${2:-}" ;;
+  *) usage; exit 2 ;;
+esac

@@ -231,6 +231,8 @@ info "Pulling immutable images and starting the customer plane"
 "${compose[@]}" up -d postgres embeddings
 migrated=false
 for attempt in 1 2 3; do
+  # The installer may be streamed via `curl | bash`. Compose otherwise reads
+  # from bash's script stdin and consumes the rest of the installer here.
   if "${compose[@]}" run --rm migrate </dev/null; then
     migrated=true
     break

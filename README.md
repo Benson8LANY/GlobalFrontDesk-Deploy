@@ -13,7 +13,7 @@ Google Cloud Shell must be able to clone this directory from a customer-accessib
 The website should use a URL shaped like:
 
 ```text
-https://shell.cloud.google.com/cloudshell/editor?cloudshell_git_repo=https://github.com/OWNER/DEPLOYMENT_REPOSITORY&cloudshell_git_branch=main&cloudshell_tutorial=tutorial.md&cloudshell_workspace=.&show=terminal
+https://shell.cloud.google.com/cloudshell/editor?cloudshell_git_repo=https://github.com/Benson8LANY/GlobalFrontDesk-Deploy&cloudshell_git_branch=stable&cloudshell_tutorial=tutorial.md&cloudshell_workspace=.&show=terminal
 ```
 
 ## Release-distribution requirement

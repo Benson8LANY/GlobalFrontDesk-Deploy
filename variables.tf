@@ -52,7 +52,7 @@ variable "installer_url" {
 variable "release_channel" {
   description = "Signed software release channel."
   type        = string
-  default     = "preview"
+  default     = "stable"
 
   validation {
     condition     = contains(["preview", "stable"], var.release_channel)
