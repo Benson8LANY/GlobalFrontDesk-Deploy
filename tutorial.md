@@ -34,6 +34,11 @@ When prompted for the **Global Front Desk installation ID**, return to the onboa
 copy the value beginning with `gfd-`, paste it into Cloud Shell, and press **Enter**. This securely
 links the private workspace to the correct purchase and setup checklist.
 
+Next, copy the **temporary deployment code** from the same onboarding page and paste it at the
+hidden prompt. The code lasts 24 hours, can report only this installation's workspace address and
+readiness, and cannot activate or access the private workspace. Global Front Desk verifies both
+values before Terraform can create any cloud resources.
+
 The installer prints your Google account and project ID, then asks **Deploy the private Global Front Desk workspace to this project? [y/N]**. Check both values. Type `y` and press **Enter** to proceed.
 
 Terraform then shows a plan for the server, encrypted disk, network, firewall rules, static IP, and service account. Check that it is for the right project. At **Approve this deployment? [y/N]**, type `y` and press **Enter**. This creates billable Google Cloud resources. The installer may first download and verify Terraform; wait for that to finish.

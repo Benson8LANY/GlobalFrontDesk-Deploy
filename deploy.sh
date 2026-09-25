@@ -2,8 +2,40 @@
 set -Eeuo pipefail
 umask 077
 
+deployment_code_file=""
+bootstrap_curl_config=""
+
+cleanup() {
+  [[ -z "$deployment_code_file" || ! -f "$deployment_code_file" ]] || rm -f -- "$deployment_code_file"
+  [[ -z "$bootstrap_curl_config" || ! -f "$bootstrap_curl_config" ]] || rm -f -- "$bootstrap_curl_config"
+}
+trap cleanup EXIT
+
 die() { printf 'Deployment stopped: %s\n' "$*" >&2; exit 1; }
 info() { printf '\n==> %s\n' "$*"; }
+
+send_bootstrap_status() {
+  local body="$1" timestamp nonce signature
+  timestamp="$(date +%s)"
+  nonce="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+  signature="$(
+    BOOTSTRAP_BODY="$body" \
+    BOOTSTRAP_NONCE="$nonce" \
+    BOOTSTRAP_TIMESTAMP="$timestamp" \
+    BOOTSTRAP_TOKEN_FILE="$deployment_code_file" \
+      python3 -c 'import hashlib,hmac,os; key=open(os.environ["BOOTSTRAP_TOKEN_FILE"],encoding="utf-8").read().encode(); message=(os.environ["BOOTSTRAP_TIMESTAMP"]+"\n"+os.environ["BOOTSTRAP_NONCE"]+"\n"+os.environ["BOOTSTRAP_BODY"]).encode(); print(hmac.new(key,message,hashlib.sha256).hexdigest())'
+  )"
+  curl --proto '=https' --tlsv1.2 --fail --silent --show-error --retry 3 --max-time 15 \
+    --config "$bootstrap_curl_config" \
+    --request POST \
+    --header 'content-type: application/json' \
+    --header "x-bootstrap-timestamp: $timestamp" \
+    --header "x-bootstrap-nonce: $nonce" \
+    --header "x-bootstrap-signature: $signature" \
+    --data "$body" \
+    "${EMAIL_AUTOMATION_CONTROL_URL:-https://license.globalfrontdesk.com}/v1/bootstrap/status" \
+    >/dev/null
+}
 
 ensure_terraform() {
   if command -v terraform >/dev/null 2>&1 && terraform version 2>/dev/null | grep -q '^Terraform v'; then
@@ -42,6 +74,7 @@ ensure_terraform() {
 }
 
 command -v gcloud >/dev/null || die "Google Cloud CLI is required. Open this installer in Google Cloud Shell."
+command -v python3 >/dev/null || die "Python 3 is required in this Cloud Shell session."
 ensure_terraform
 
 active_account="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' | head -1)"
@@ -59,6 +92,20 @@ if [[ -z "$installation_id" ]]; then
 fi
 [[ "$installation_id" =~ ^gfd-[a-f0-9-]{36}$ ]] \
   || die "Copy the installation ID exactly from Global Front Desk onboarding."
+
+read -r -s -p "Temporary deployment code from Global Front Desk: " deployment_code
+printf '\n'
+[[ ${#deployment_code} -ge 40 ]] || die "The deployment code is invalid. Copy it exactly from onboarding."
+deployment_code_file="$(mktemp)"
+bootstrap_curl_config="$(mktemp)"
+printf '%s' "$deployment_code" > "$deployment_code_file"
+printf 'header = "Authorization: Bearer %s"\n' "$deployment_code" > "$bootstrap_curl_config"
+chmod 0600 "$deployment_code_file" "$bootstrap_curl_config"
+unset deployment_code
+
+authorization_body="$(printf '{\"installationId\":\"%s\"}' "$installation_id")"
+send_bootstrap_status "$authorization_body" \
+  || die "The installation ID and deployment code could not be verified. No cloud resources were changed."
 
 project_state="$(gcloud projects describe "$project_id" --format='value(lifecycleState)' 2>/dev/null || true)"
 [[ "$project_state" == "ACTIVE" ]] || die "The selected project is unavailable: $project_id"
@@ -97,6 +144,11 @@ Installation ID: $installation_id
 EOF
 chmod 0600 deployment-result.txt
 
+installing_body="$(printf '{\"installationId\":\"%s\",\"workspaceUrl\":\"%s\",\"ready\":false}' "$installation_id" "$dashboard_url")"
+if ! send_bootstrap_status "$installing_body"; then
+  printf 'Warning: Global Front Desk could not receive the initial deployment status. The installer will retry after the workspace is ready.\n'
+fi
+
 info "Waiting for the private workspace"
 printf 'Google is installing Global Front Desk on the new server. This normally takes 5-10 minutes.\n'
 ready=false
@@ -115,6 +167,11 @@ if [[ "$ready" != true ]]; then
   printf '\nThe server is still installing. Your links are safe in deployment-result.txt.\n'
   printf 'To check progress, run:\n  %s\n\n' "$(terraform output -raw installation_log_command)"
   exit 1
+fi
+
+ready_body="$(printf '{\"installationId\":\"%s\",\"workspaceUrl\":\"%s\",\"ready\":true}' "$installation_id" "$dashboard_url")"
+if ! send_bootstrap_status "$ready_body"; then
+  printf 'Warning: The workspace is ready, but Global Front Desk did not receive the final status. Keep deployment-result.txt and use Check status in onboarding.\n'
 fi
 
 info "Your private workspace is ready"

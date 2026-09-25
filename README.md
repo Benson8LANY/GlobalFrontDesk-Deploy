@@ -2,7 +2,7 @@
 
 This package powers the customer-owned **Deploy to Google Cloud** button.
 
-The customer opens a Google Cloud Shell tutorial, selects a billing-enabled project, enables the required APIs, and runs `deploy.sh`. Terraform shows the complete plan before creating a dedicated network, static IP, Shielded VM, encrypted boot disk, and runtime service account. The application then installs from the signed Global Front Desk release channel.
+The customer opens a Google Cloud Shell tutorial, selects a billing-enabled project, enables the required APIs, and runs `deploy.sh`. Before Terraform can create resources, the script verifies the installation ID and a short-lived, installation-scoped deployment code issued by Global Front Desk. Terraform then shows the complete plan before creating a dedicated network, static IP, Shielded VM, encrypted boot disk, and runtime service account. The application installs from the signed Global Front Desk release channel, while signed bootstrap reports make its URL and readiness visible in onboarding before license activation.
 
 The deployment does not request access to the customer's Gmail account. After the server is running, the customer creates their own Google OAuth application and authorizes Gmail from inside the private workspace.
 
