@@ -121,6 +121,7 @@ resource "google_compute_instance" "workspace" {
     installer_url   = var.installer_url
     release_channel = var.release_channel
     setup_token     = random_password.owner_setup.result
+    installation_id = var.installation_id
   })
 
   depends_on = [
@@ -128,4 +129,3 @@ resource "google_compute_instance" "workspace" {
     google_compute_firewall.iap_ssh,
   ]
 }
-

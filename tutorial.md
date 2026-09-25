@@ -30,6 +30,10 @@ Click **Copy to Cloud Shell** beside the command below. If Google offers **Run**
 bash deploy.sh "<walkthrough-project-id/>"
 ```
 
+When prompted for the **Global Front Desk installation ID**, return to the onboarding page,
+copy the value beginning with `gfd-`, paste it into Cloud Shell, and press **Enter**. This securely
+links the private workspace to the correct purchase and setup checklist.
+
 The installer prints your Google account and project ID, then asks **Deploy the private Global Front Desk workspace to this project? [y/N]**. Check both values. Type `y` and press **Enter** to proceed.
 
 Terraform then shows a plan for the server, encrypted disk, network, firewall rules, static IP, and service account. Check that it is for the right project. At **Approve this deployment? [y/N]**, type `y` and press **Enter**. This creates billable Google Cloud resources. The installer may first download and verify Terraform; wait for that to finish.

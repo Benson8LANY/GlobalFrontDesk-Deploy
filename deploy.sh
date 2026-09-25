@@ -53,6 +53,13 @@ if [[ -z "$project_id" ]]; then
 fi
 [[ -n "$project_id" && "$project_id" != "(unset)" ]] || die "Select a Google Cloud project in the tutorial first."
 
+installation_id="${2:-${EMAIL_AUTOMATION_INSTALLATION_ID:-}}"
+if [[ -z "$installation_id" ]]; then
+  read -r -p "Global Front Desk installation ID (starts with gfd-): " installation_id
+fi
+[[ "$installation_id" =~ ^gfd-[a-f0-9-]{36}$ ]] \
+  || die "Copy the installation ID exactly from Global Front Desk onboarding."
+
 project_state="$(gcloud projects describe "$project_id" --format='value(lifecycleState)' 2>/dev/null || true)"
 [[ "$project_state" == "ACTIVE" ]] || die "The selected project is unavailable: $project_id"
 
@@ -71,7 +78,7 @@ terraform init -input=false
 
 info "Showing the infrastructure Google will create"
 rm -f .deployment.tfplan
-terraform plan -input=false -out=.deployment.tfplan -var="project_id=$project_id"
+terraform plan -input=false -out=.deployment.tfplan -var="project_id=$project_id" -var="installation_id=$installation_id"
 [[ -s .deployment.tfplan ]] || die "Terraform did not create a deployment plan. Nothing was changed."
 
 printf '\nThis plan creates one VM, one encrypted disk, a dedicated network, firewall rules, a static IP, and a runtime service account.\n'
@@ -86,6 +93,7 @@ owner_setup_url="$(terraform output -raw owner_setup_url)"
 cat > deployment-result.txt <<EOF
 Private dashboard: $dashboard_url
 One-time owner setup: $owner_setup_url
+Installation ID: $installation_id
 EOF
 chmod 0600 deployment-result.txt
 

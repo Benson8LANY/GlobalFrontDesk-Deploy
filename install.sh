@@ -122,7 +122,9 @@ curl --proto '=https' --tlsv1.2 -fsSL --retry 3 "$cosign_url" -o "$tmp/cosign"
 install -m 0755 "$tmp/cosign" /usr/local/bin/cosign
 
 info "Generating customer-owned secrets and recovery identity"
-installation_id="$(cat /proc/sys/kernel/random/uuid)"
+installation_id="${EMAIL_AUTOMATION_INSTALLATION_ID:-$(cat /proc/sys/kernel/random/uuid)}"
+[[ "$installation_id" =~ ^gfd-[a-f0-9-]{36}$ || "$installation_id" =~ ^[a-f0-9-]{36}$ ]] \
+  || die "The Global Front Desk installation ID is invalid."
 auth_secret="$(openssl rand -base64 48 | tr -d '\n')"
 encryption_key="$(openssl rand -base64 32 | tr -d '\n')"
 postgres_owner_password="$(openssl rand -hex 32)"

@@ -3,6 +3,16 @@ variable "project_id" {
   type        = string
 }
 
+variable "installation_id" {
+  description = "Authoritative Global Front Desk installation ID from onboarding."
+  type        = string
+
+  validation {
+    condition     = can(regex("^gfd-[a-f0-9-]{36}$", var.installation_id))
+    error_message = "Copy the gfd- installation ID exactly from Global Front Desk onboarding."
+  }
+}
+
 variable "deployment_name" {
   description = "Prefix for resources created by this deployment."
   type        = string
