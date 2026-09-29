@@ -2,13 +2,23 @@
 
 <walkthrough-tutorial-duration duration="25"></walkthrough-tutorial-duration>
 
-This guide creates one private application server in **your** Google Cloud account. Allow 15–30 minutes for Cloud Shell, Google approvals, and installation. Your email, OAuth credentials, AI key, database, and logs stay in your account.
+This guide creates one private application server in **your** Google Cloud account. Allow 20–40 minutes for Cloud Shell, Google approvals, and installation. Enabling Google services can take 5–10 minutes by itself. Your email, OAuth credentials, AI key, database, and logs stay in your account.
+
+Google bills your company directly. A typical always-on deployment costs roughly **$30–$45 USD per month**, depending on region, traffic, taxes, discounts, and future Google pricing. Before anything billable is created, Terraform shows the exact resource plan: one e2-medium VM, one 30 GB encrypted disk, a dedicated network and subnet, HTTPS and restricted IAP SSH firewall rules, one static IP, and one runtime service account.
 
 If Google first shows **Open in Cloud Shell**, check **Trust repo** and click **Confirm**. This only copies the installer files into Cloud Shell. Seeing the files or a terminal prompt does **not** mean the server has been created. Use this tutorial panel to continue.
 
 ## Choose your Google Cloud project
 
-Click **Select a project** in this panel. Choose an empty project your company controls. An existing “My First Project” is fine if it belongs to you and billing is active. Google charges your company for the server after you approve the deployment plan. If prompted to start or resume a tutorial, start this one from the beginning.
+Sign in with the Google account your company wants to use to own and pay for this server. This account can be different from the mailbox you automate later.
+
+Click **Select a project** in this panel:
+
+1. If your company already has a suitable billing-enabled project, select it.
+2. If not, click **New project**, enter a recognizable project name, choose the company organization and billing account when offered, and click **Create**.
+3. Return to this tutorial and select the new project.
+
+An existing “My First Project” is also fine if your company controls it and billing is active. Google charges your company for the server only after you approve the deployment plan. If prompted to start or resume a tutorial, start this one from the beginning.
 
 <walkthrough-project-setup billing="true"></walkthrough-project-setup>
 
@@ -16,7 +26,7 @@ Check the project **ID** carefully: **<walkthrough-project-id/>**. Two projects 
 
 ## Approve the required Google services
 
-Global Front Desk needs Compute Engine for the private server and IAM for its restricted runtime identity. Click **Copy to Cloud Shell** beside the command below. If Google offers **Run**, click it; otherwise press **Enter** in the terminal. Wait for the command to finish before clicking **NEXT**.
+Global Front Desk needs Compute Engine for the private server and IAM for its restricted runtime identity. Click **Copy to Cloud Shell** beside the command below. If Google offers **Run**, click it; otherwise press **Enter** in the terminal. Run it only once. Google can take **5–10 minutes** to enable the services, and the terminal may be quiet while it works. Wait until the command prompt returns before clicking **NEXT**.
 
 <walkthrough-enable-apis apis="compute.googleapis.com,iam.googleapis.com,serviceusage.googleapis.com"></walkthrough-enable-apis>
 
@@ -35,9 +45,12 @@ copy the value beginning with `gfd-`, paste it into Cloud Shell, and press **Ent
 links the private workspace to the correct purchase and setup checklist.
 
 Next, copy the **temporary deployment code** from the same onboarding page and paste it at the
-hidden prompt. The code lasts 24 hours, can report only this installation's workspace address and
-readiness, and cannot activate or access the private workspace. Global Front Desk verifies both
-values before Terraform can create any cloud resources.
+hidden prompt. **Nothing appears in the terminal while you paste this secret. That is expected.**
+Paste it once, press **Enter**, and do not paste it a second time. The code lasts 24 hours, can
+report only this installation's workspace address and readiness, and cannot activate or access the
+private workspace. Global Front Desk verifies both values before Terraform can create any cloud
+resources. If validation fails or you need to restart these prompts, run
+`bash deploy.sh "<walkthrough-project-id/>"` again.
 
 The installer prints your Google account and project ID, then asks **Deploy the private Global Front Desk workspace to this project? [y/N]**. Check both values. Type `y` and press **Enter** to proceed.
 
